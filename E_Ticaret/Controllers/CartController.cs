@@ -4,7 +4,7 @@ namespace E_Ticaret.Controllers
 {
     public class CartController : Controller
     {
-        public IActionResult Index()
+        public IActionResult Cart()
         {
             return View("Cart");
         }
