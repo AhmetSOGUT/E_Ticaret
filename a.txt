@@ -5,20 +5,111 @@ input {
 }
 
 filter {
-  if [message] =~ /pgaudit/ {
-    csv {
-      columns => ["log_time", "user_name", "database_name", "process_id", "connection_from", "session_id", "session_line_num", "command_tag", "session_start_time", "virtual_transaction_id", "transaction_id", "error_severity", "sql_state_code", "message", "detail", "hint", "internal_query", "internal_query_pos", "context", "query", "query_pos", "location", "application_name", "backend_type", "leader_pid", "query_id"]
+  # 1. Adım: CSV satırını parse et
+  csv {
+    separator => ","
+    quote_char => "\""
+    columns => [
+      "log_time", "user_name", "database_name", "process_id",
+      "connection_from", "session_id", "session_line_num",
+      "command_tag", "session_start_time", "virtual_transaction_id",
+      "transaction_id", "error_severity", "sql_state_code",
+      "message", "detail"
+    ]
+  }
+
+  # 2. Adım: pgaudit mesajını parse et (AUDIT satırları için)
+  if [message] =~ /^AUDIT:/ {
+    grok {
+      match => {
+        "message" => "AUDIT: %{WORD:audit_type},%{INT:audit_statement_id},%{INT:audit_substatement_id},%{WORD:audit_class},%{DATA:audit_command},%{DATA:audit_object_type},%{DATA:audit_object_name},%{GREEDYDATA:audit_statement}"
+      }
     }
-    date {
-      match => [ "log_time", "yyyy-MM-dd HH:mm:ss.SSS ZZZ" ]
-      target => "@timestamp"
+  }
+
+  # 3. Adım: Tarih alanını Elasticsearch için düzenle
+  date {
+    match => ["log_time", "yyyy-MM-dd HH:mm:ss.SSS z", "yyyy-MM-dd HH:mm:ss z"]
+    target => "@timestamp"
+    timezone => "Europe/Istanbul"
+  }
+
+  # 4. Adım: Gereksiz alanları temizle
+  mutate {
+    remove_field => ["message", "host", "agent", "ecs", "input", "log", "@version"]
+    convert => {
+      "process_id"           => "integer"
+      "session_line_num"     => "integer"
+      "transaction_id"       => "integer"
+      "audit_statement_id"   => "integer"
+      "audit_substatement_id" => "integer"
     }
   }
 }
 
 output {
   elasticsearch {
-    hosts => ["localhost:9200"]
-    index => "pgaudit-log-%{+YYYY.MM.dd}"
+    hosts    => ["http://localhost:9200"]
+    index    => "pgaudit-%{+YYYY.MM.dd}"
+    user     => "elastic"
+    password => "your_password"
   }
 }
+
+
+
+
+filebeat.inputs:
+  - type: log
+    enabled: true
+    paths:
+      - /var/lib/pgsql/17/data/log/*.csv
+    multiline:
+      pattern: '^\d{4}-\d{2}-\d{2}'
+      negate: true
+      match: after
+    fields:
+      type: pgaudit
+    fields_under_root: true
+
+output.logstash:
+  hosts: ["localhost:5044"]
+
+
+
+
+PUT _index_template/pgaudit
+{
+  "index_patterns": ["pgaudit-*"],
+  "template": {
+    "mappings": {
+      "properties": {
+        "@timestamp":         { "type": "date" },
+        "user_name":          { "type": "keyword" },
+        "database_name":      { "type": "keyword" },
+        "error_severity":     { "type": "keyword" },
+        "audit_type":         { "type": "keyword" },
+        "audit_class":        { "type": "keyword" },
+        "audit_command":      { "type": "keyword" },
+        "audit_object_name":  { "type": "keyword" },
+        "audit_statement":    { "type": "text" },
+        "process_id":         { "type": "integer" }
+      }
+    }
+  }
+}
+
+
+
+
+echo '2024-01-15 14:23:45.123 UTC,"postgres","mydb",1234,"127.0.0.1",abc123,1,SELECT,2024-01-15 14:00:00 UTC,1/0,0,LOG,00000,"AUDIT: OBJECT,1,1,READ,SELECT,TABLE,public.users,SELECT * FROM users",""' \
+  | /usr/share/logstash/bin/logstash -e '
+input { stdin {} }
+filter {
+  csv {
+    columns => ["log_time","user_name","database_name","process_id","connection_from","session_id","session_line_num","command_tag","session_start_time","virtual_transaction_id","transaction_id","error_severity","sql_state_code","message","detail"]
+  }
+}
+output { stdout { codec => rubydebug } }'
+
+
