@@ -112,3 +112,59 @@ enabled=1
 autorefresh=1
 type=rpm-md
 EOF
+
+
+
+input {
+  beats {
+    port => 5044
+  }
+}
+
+filter {
+  if [fields][type] == "postgresql" {
+
+    # Ana log satırını parçala
+    grok {
+      match => {
+        "message" => [
+          "%{TIMESTAMP_ISO8601:pg_timestamp} \+\d+ \[%{NUMBER:pid}\] %{WORD:pg_user}@%{WORD:pg_database} %{WORD:log_level}:\s+%{GREEDYDATA:log_message}",
+          "%{TIMESTAMP_ISO8601:pg_timestamp} \+\d+ \[%{NUMBER:pid}\] %{WORD:log_level}:\s+%{GREEDYDATA:log_message}",
+          "%{GREEDYDATA:log_message}"
+        ]
+      }
+      tag_on_failure => []
+    }
+
+    # pgAudit satırlarını ayrıca parçala
+    if [log_message] =~ /AUDIT:/ {
+      grok {
+        match => {
+          "log_message" => "AUDIT: %{WORD:audit_type},%{NUMBER:statement_id},%{NUMBER:substatement_id},%{DATA:audit_class},%{DATA:audit_command},%{DATA:object_type},%{DATA:object_name},%{GREEDYDATA:audit_statement}"
+        }
+        tag_on_failure => ["_audit_parse_fail"]
+      }
+      mutate { add_tag => ["pgaudit"] }
+    }
+
+    # Timestamp düzelt
+    if [pg_timestamp] {
+      date {
+        match => ["pg_timestamp", "ISO8601"]
+        target => "@timestamp"
+      }
+    }
+
+    # Gereksiz alanları temizle
+    mutate {
+      remove_field => ["agent", "ecs", "input", "log", "event"]
+    }
+  }
+}
+
+output {
+  elasticsearch {
+    hosts => ["http://localhost:9200"]
+    index => "postgresql-audit-%{+YYYY.MM.dd}"
+  }
+}
